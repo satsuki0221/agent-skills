@@ -1038,6 +1038,37 @@ host port だけは同じ port を取り合う)。回避策は repo 固有 (test
   branch の PR は test 実行できない → review dispatch 時は **diff-only 指示**
   を含める (詳細は `codex-review` SKILL「Step 3.6: worktree PR は diff-only 指示」節)
 
+### 前段 = DW feature-decompose (分解 + 着手前 audit)
+
+multiworker (上記節) の **前段** = 「feature を sub-PR に割る / 各 worker の write-set を決める /
+依存順序を引く / 着手前 audit」を、手作業でなく **Dynamic Workflows の `/feature-decompose`**
+で生成する。DW が strictly 得意な分析フェーズで、ここを外すと共有 registry 衝突 / scope 漏れ /
+async 衝突を後段の codex review round でようやく踏む (過去 dogfood 実証: 人間 flow が review/self-review
+でやっと捕まえた issue を DW 前段が着手前に flag できた)。
+
+**境界 (literal)**:
+- **DW = 前段のみ**: 分解 / write-set / 依存 / adversarial audit。**decompose+audit の 2 層セットで使う**
+- **devteam = 後段**: codex クロスベンダー review + 実行中 live 介入 + 人間 GO。DW が構造的に持てない領分
+  (subagent は全部 Claude = codex 不可、走行中 agent の live steering 不可)
+
+**手順**:
+
+1. **起動**: `/feature-decompose` を `args: { feature: "<日本語説明>", scope: ["<触る dir/file>", ...] }`
+   で実行。`{ decomposition, audit_flags }` が返る (中間調査は DW 内に留まり main context を汚さない)
+2. **咀嚼 (鍵)**: **decompose 単体を信用しない**。`audit_flags` を読み、P1/P2 を「着手前に潰す懸念」に
+   昇格する。過去 dogfood で decompose が楽観的に並列可と外したのを audit 層が deploy 順 P1 で矯正した
+   実証に基づく。audit を読み飛ばすと地雷を踏む
+3. **briefing 化**: 各 worker の `/tmp/devteam_relay_<topic>-r<N>-<alias>.md` に、その worker の
+   `write_set` (= 触る path リスト、上記「B. main 別 file path / 新規 file 命名 の pre-assign」節と
+   合流) と、該当する `audit_flags` を「実装前に対処する既知の懸念」として埋める
+4. **以降は本節の既存 multiworker flow 不変**: worktree 分離 / codex review / live 介入 / 人間 GO
+
+**適用判断**: 本節 multiworker の発動条件 (~300 LOC 超 / component 3+ / 独立 sub-PR、`harness/devteam.local.md`
+の rule-refs) と同じ。trivial feature は前段 DW 不要 (overhead > 価値)。
+
+**degrade**: DW は research preview。workflow script が動かなくなったら前段を手作業に倒す (= 本節の
+従来 multiworker そのまま)。後段は無傷。
+
 ### cmux tree 役割判別 (alias 振り分け)
 
 ```
