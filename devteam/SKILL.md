@@ -392,12 +392,15 @@ DISPATCH_MARKER scan (scrollback) で stale が確定できない微妙なケー
 
 ### `REVIEW_DONE_NO_VERDICT` fallback の P1/P2 抽出 hint
 
-codex は指摘を通常 `P1:` / `P2:` / `[P1]` / `**P1**` のいずれかの
-書式で書く。fallback 時は:
+codex は指摘を通常 `P1:` / `P2:` / `[P1]` / `**P1**`、および
+**連番形式 `P1-1:` / `P2-1:` / `P2-2:`** のいずれかの書式で書く。fallback 時は:
 
 ```bash
-p1_count=$(echo "$body" | grep -cEi "(^|\[|\*\*)P1[:\]\*]")
-p2_count=$(echo "$body" | grep -cEi "(^|\[|\*\*)P2[:\]\*]")
+# 文字クラスに `-` を含める (先頭に置いて range 解釈を回避): P2-1: 等の連番形式も拾う。
+# `-` を欠くと codex 多用の `P2-1:` 形式を 0 件と誤カウントし、
+# P2≥1 を P2=0 と読み違えて auto approve に誤誘導する (dogfood で実証)。
+p1_count=$(echo "$body" | grep -cEi "(^|\[|\*\*)P1[-:\]\*]")
+p2_count=$(echo "$body" | grep -cEi "(^|\[|\*\*)P2[-:\]\*]")
 ```
 
 を目安に使い、review 節の 3 分岐テーブル (auto needs-changes /
@@ -605,7 +608,7 @@ ROUND="${ROUND:-1}"
 
 # 3. reviewer pane 特定 (cmux tree)
 # 4. 送信 — 最終行に verdict を **単独行** で出すよう厳格に指示する
-cmux send --surface <reviewer_surface> "Please read /tmp/codex_${TOPIC}.md and review the changes. Reply in Japanese. Focus: correctness, security, race conditions, edge cases.
+cmux send --surface <reviewer_surface> "Please read /tmp/codex_${TOPIC}-r${ROUND}.md and review the changes. Reply in Japanese. Focus: correctness, security, race conditions, edge cases.
 
 出力末尾の要件 (厳守):
 - 最終行は必ず以下のいずれかを **単独行** (前後に他の文字なし) で出力:
@@ -627,6 +630,8 @@ cmux send-key --surface <reviewer_surface> return
 **review 完了の auto-catch (必須)**: codex には Stop hook 相当が無いので、supervisor が Monitor でバックグラウンド watch を立てて完了 signal を取りにいく。review dispatch 直後に必ず実行:
 
 > **supervisor が Claude Code の場合**、以下の while ループは **`run_in_background: true` で Bash tool 起動** すると session 内 async として動き、VERDICT 検知で `exit 0` した瞬間に Claude へ auto-notification が届く。これが primary パターン。詳細は上述「共通: supervisor 側 async 運用 (Claude Code の場合)」節の Primary 節を参照。cross-session にまたがる長期待ちなら同節の Fallback (1-shot probe + ScheduleWakeup) を使う。shell / shellscript supervisor では下記ループをそのまま foreground で使ってよい。
+>
+> **どちらの body を literal に使うか (precedence)**: Claude Code supervisor は **下記 inline `while` 版をコピーせず**、上述 Primary 節の script file 版 (`/tmp/devteam_monitor_codex_<topic>-r<N>.sh`、`for $(seq 1 90)` + `sed` slice + `awk` の 4-layer guard、`run_in_background` 起動) を **canonical body** として使う。下記 inline `while` は **内容等価の参照用**で、shell / shellscript supervisor が foreground で回すときの形。両者は guard ロジックが同一になるよう保つ (片方だけ直さない)。
 
 ```bash
 # Monitor は以下を兼ねる:
@@ -639,8 +644,9 @@ cmux send-key --surface <reviewer_surface> return
 Monitor の command イメージ (4 重 guard):
 ```bash
 # DISPATCH_MARKER: 今回の review dispatch を anchor する固有の文字列。
-# 通常 /tmp/codex_${TOPIC}.md のパス自体が session 内ユニーク。
-DISPATCH_MARKER="codex_${TOPIC}.md"
+# round suffix 付き path (例: /tmp/codex_${TOPIC}-r${ROUND}.md) 自体が session 内ユニーク。
+# bundle 書き出し (前述 review 節の `} > /tmp/codex_${TOPIC}-r${ROUND}.md`) と必ず同じ名前にする。
+DISPATCH_MARKER="codex_${TOPIC}-r${ROUND}.md"
 
 while true; do
   out=$(cmux read-screen --surface <reviewer_surface> --scrollback 2>/dev/null)
@@ -686,7 +692,7 @@ done
 
 ```bash
 cmux read-screen --surface <reviewer_surface> --scrollback \
-  | awk -v m="codex_${TOPIC}.md" '$0 ~ m {found=1} found{print}' \
+  | awk -v m="codex_${TOPIC}-r${ROUND}.md" '$0 ~ m {found=1} found{print}' \
   | tail -300
 ```
 
@@ -881,6 +887,10 @@ state: <idle | working | last-reviewed>
 - supervisor は **alias 付き prefix** (`[supervisor→main:m1]` / `[main:m2→supervisor]`) で routing
 - reviewer は 1 つのまま (FIFO queue で順次 dispatch)
 
+> **`<worktree-prefix>` の解決 (正本)**: これは `harness/devteam.local.md` の worktree-prefix 節で定義する project 固有値。**local.md 不在時の保守的 default は `.worktrees/<topic>`** (`.worktrees/` は gitignore 済前提で repo を汚さず teardown が容易)。よって multi-main の各 main の worktree path は **`.worktrees/<topic>-<alias>`** (alias = `m1`/`m2`/`m3`) に解決する。
+> **suffix の使い分け**: multi-main mode (supervisor + 独立 main 群) は **alias suffix `-m1`/`-m2`** を使う。後述「Multi-worker 並列 (coordinator=main)」節に出る `-a`/`-b` は **別 topology (coordinator=main + worker 群) の worker label** であって multi-main の alias とは別物。混在させない。
+> **base の正本**: worktree の base は **`origin/main`** に統一 (remote 最新から切り stale を避ける)。remote 不在の offline 環境でのみ local `main` を fallback に使う。
+
 ### Use case
 
 - **A. Different-issue parallel**: m1 が issue A、m2 が issue B を並行 fix。supervisor は両者の report を独立に受けて reviewer に順次 dispatch
@@ -965,9 +975,10 @@ worktree を作らず、 **1 worktree (project root or 既存 worktree) を 2 ma
 **`superpowers:using-git-worktrees` skill を内部呼出し** (重複実装しない):
 
 ```bash
-# 各 main の専用 branch を同時に切る (-b 必須)
-git worktree add -b fix/<N>-<topic> <worktree-prefix>-m1 main
-git worktree add -b harness/<topic> <worktree-prefix>-m2 main
+# 各 main の専用 branch を同時に切る (-b 必須)。base は origin/main で統一 (前述「<worktree-prefix> の解決」参照)。
+# <worktree-prefix> の default は .worktrees/<topic> (local.md 不在時)。
+git worktree add -b fix/<N>-<topic> <worktree-prefix>-m1 origin/main
+git worktree add -b harness/<topic> <worktree-prefix>-m2 origin/main
 ```
 
 **`-b <branch>` は省略不可** (過去 dogfood で確定): `main` branch は project root で既に checkout 済なので、`git worktree add <worktree-prefix>-m1 main` (branch 指定なし) は **`fatal: 'main' is already used by worktree at ...`** で fail する。各 main 用に **専用 branch を `-b` で同時に作成** することで衝突を回避し、main pane が即 task に着手できる。
@@ -1116,8 +1127,8 @@ queue は supervisor session ephemeral (文字列 list で管理)。queue 状態
 # supervisor 動作:
 # 1. user GO 確認 (1 回だけ、layout / worktree path / 各 main 用 branch 名提示)
 # 2. cmux new-split で main:m1 / main:m2 用 pane 作成 + claude 起動
-# 3. git worktree add -b <m1_branch> <worktree-prefix>-m1 main   # -b 必須 (詳細は「Worktree 分離」節)
-# 4. git worktree add -b <m2_branch> <worktree-prefix>-m2 main   # 同上
+# 3. git worktree add -b <m1_branch> <worktree-prefix>-m1 origin/main   # -b 必須・base=origin/main (詳細は「Worktree 分離」節)
+# 4. git worktree add -b <m2_branch> <worktree-prefix>-m2 origin/main   # 同上
 # 5. 各 main pane で cd <worktree-prefix>-<alias> + プロンプト整え
 # 6. 役割 marker file 書込 (/tmp/cmux-role-surface-<id>.txt に "main:m1" / "main:m2")
 # 7. supervisor 内 alias_map を session memory に保持 (cmux tree で再構築可能)
