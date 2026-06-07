@@ -8,6 +8,12 @@
   Claude 専用 (`agents: [claude]`)。bootstrap / relay / review / status / ask / report / multi-worker /
   前段 DW feature-decompose handoff を持つ。**project 固有値** (deploy コマンド / worktree path /
   並列 test 設定 / 正本ルール参照) は本体に書かず、consumer 側の `harness/devteam.local.md` で override する。
+- `claude-review-multi/` — Claude サブエージェント 4 並列のマルチレビュー (Correctness / Risk / UI-UX /
+  Language-framework) + coordinator 統合。codex / cmux 不要、Workflow ツールで動く。同梱の
+  `claude-review-multi.mjs` を `~/.claude/workflows/` に配置 (コピー or symlink) して使う。**repo 固有の
+  codegen 除外**は `args.exclude` (pathspec 配列) で渡す — 本体には書かない。
+- `codex-review-multi/` — codex CLI で 4/6/8 reviewer のマルチレビュー。`using-cmux` で別ペインに
+  `codex exec` を立ち上げて結果を回収する (cmux + codex CLI 前提)。reviewer プロンプトは `prompts/` に外出し。
 
 ## consumer での使い方
 
